@@ -8,7 +8,7 @@
 | Service Mesh 3.4/Istio 1.30.4 | O requisito pede `GatewayClass` Istio e controle próprio do mesh. | `IstioCNI`, `Istio` e o label `istio.io/rev` são necessários. |
 | `AuthPolicy` no `HTTPRoute` | Isola a política desta API sem afetar outros gateways. | Cada rota pode evoluir suas roles independentemente. |
 | `Service` `LoadBalancer` com MetalLB | O Gateway é exposto diretamente por um VIP L2 reservado para a API. | DNS do hostname do `HTTPRoute` deve apontar para o VIP; o pool precisa pertencer à rede externa dos nós. |
-| `externalTrafficPolicy: Local` + `ipBlocks` | O MetalLB entrega tráfego L4; a política avalia o IP do cliente no gateway. | Há dependência de gateway local em cada nó que anuncia o VIP; escale o gateway para os nós anunciadores em produção. |
+| Allowlist OPA/Rego no `HTTPRoute` | A API precisa de uma allowlist sem afetar outras rotas do mesmo Gateway. | O Authorino avalia o endereço de origem no pedido de autorização; a política de origem fica junto das regras JWT/RBAC da rota. |
 | Keycloak gerenciado pelo operador existente | O operador já é restrito ao namespace `keycloak`. | O realm foi isolado por nome, sem mudar o escopo do operador. |
 | OPA/Rego para path + role | Expressa a associação endpoint-role em uma única política, fora da aplicação. | Qualquer caminho não listado permanece negado. |
 
@@ -27,13 +27,14 @@ e o `Deployment`; apenas crie/associe `Gateway`, `HTTPRoute` e `AuthPolicy`.
 
 ## Allowlist de origem
 
-A camada de origem é propositalmente separada de autenticação e RBAC. A
-`AuthorizationPolicy` de `05-source-cidr-authorization.yaml` tem `targetRef`
-para o `Gateway`, usa `ipBlocks` e só libera a requisição para as políticas
-seguintes quando o endereço remoto está na lista. O `Service` do gateway é
-`LoadBalancer`, recebe um VIP do MetalLB e usa `externalTrafficPolicy: Local`
-para evitar a perda do IP de origem. O guia de
-[IP/CIDR](source-cidr-allowlist.md) contém o modelo reutilizável.
+A camada de origem é aplicada na mesma `AuthPolicy` que já aponta para o
+`HTTPRoute`. A regra OPA/Rego lê o endereço remoto recebido pelo Authorino,
+remove a porta do endereço IPv4 e compara o IP com os CIDRs autorizados. Assim,
+uma rota pode ter sua própria allowlist sem afetar outras APIs no mesmo Gateway.
+O `Service` do gateway continua publicado diretamente por VIP MetalLB e usa
+`externalTrafficPolicy: Local` para preservar a origem. O guia de
+[IP/CIDR](source-cidr-allowlist.md) contém o modelo reutilizável e a alternativa
+de escopo no Gateway.
 
 ## Limitações e próximos passos
 

@@ -26,6 +26,16 @@ spec:
               input.request.path == "/red"
               input.auth.identity.realm_access.roles[_] == "red"
             }
+      source-cidr:
+        opa:
+          rego: |
+            # Authorino receives the IPv4 peer address with its source port.
+            source_address := input.context.source.address.Address.SocketAddress.address
+            source_ip := split(source_address, ":")[0]
+
+            allow {
+              net.cidr_contains("100.64.0.2/32", source_ip)
+            }
     response:
       unauthenticated:
         code: 401

@@ -3,8 +3,8 @@
 Esta entrega instala uma demonstração de autenticação OIDC/JWT, autorização
 RBAC por endpoint e allowlist de IP/CIDR no OpenShift. A aplicação não conhece
 Keycloak, JWT, roles nem IP de origem: os bloqueios acontecem no gateway,
-publicado diretamente por um VIP MetalLB, com `AuthorizationPolicy` do Istio e
-`AuthPolicy` do Red Hat Connectivity Link (RHCL), sem alteração do código da
+publicado diretamente por um VIP MetalLB, com uma `AuthPolicy` do Red Hat
+Connectivity Link (RHCL) anexada ao `HTTPRoute`, sem alteração do código da
 aplicação.
 
 Comece pelo [índice da documentação](docs/README.md). Os guias da

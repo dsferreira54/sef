@@ -1,63 +1,86 @@
-# Allowlist de IP e CIDR no gateway
+# Allowlist de IP e CIDR por HTTPRoute ou Gateway
 
 ## Resultado
 
-O `HTTPRoute` `hello-rbac` é publicado diretamente por um VIP do MetalLB. A
-`AuthorizationPolicy` avalia o endereço IP da conexão recebida pelo Gateway e
-nega origens que não pertencem à allowlist, sem alteração no `Deployment`,
-`Service` da aplicação ou código.
-
-Este é o guia da segunda entrega e pressupõe a configuração de realm, cliente,
-JWT e roles descrita em [OIDC/JWT e RBAC por endpoint](jwt-rbac.md).
+O `HTTPRoute` da demonstração é publicado diretamente por um VIP MetalLB. A
+allowlist de origem foi validada na `AuthPolicy` do RHCL anexada ao próprio
+`HTTPRoute`: uma origem autorizada, com JWT válido, recebeu 200; uma origem
+fora da lista, com o mesmo JWT, recebeu 403. A aplicação não foi modificada.
 
 ```mermaid
 flowchart LR
   C[Cliente] -->|HTTP + Host| V[VIP MetalLB]
   V --> G[Gateway Istio]
-  G --> P{AuthorizationPolicy\nipBlocks}
-  P -->|CIDR não permitido: 403| C
-  P -->|CIDR permitido| A[AuthPolicy RHCL]
-  A -->|JWT/role inválido: 401 ou 403| C
-  A -->|permitido| H[HTTPRoute → Service]
+  G --> A[AuthPolicy no HTTPRoute]
+  A -->|IP fora do CIDR: 403| C
+  A -->|IP permitido + JWT/role válidos| H[Serviço Hello World]
 ```
 
-## Decisões e pré-requisitos
+## Opções de escopo
 
-O gateway gerenciado pelo Istio é exposto como `Service` do tipo
-`LoadBalancer`. O MetalLB aloca um IP de um `IPAddressPool` reservado e o
-anuncia por L2. A rede externa DEVE encaminhar esse bloco até os nós do cluster;
-reservar um endereço livre, roteável e fora de DHCP é responsabilidade da equipe
-de rede.
+| Opção | Recurso | Escopo | Uso indicado |
+|---|---|---|---|
+| `AuthPolicy` RHCL | `HTTPRoute` | Uma API/rota | Gateway compartilhado; cada API controla sua allowlist. |
+| `AuthorizationPolicy` Istio | `Gateway` | Todas as rotas do Gateway | Gateway dedicado ou regra corporativa comum a todas as rotas. |
 
-O serviço também usa `externalTrafficPolicy: Local`. Com um balanceador L4 que
-preserva origem, essa opção evita o encaminhamento por kube-proxy a outro nó e
-permite que o gateway avalie o IP do cliente. Em produção, RECOMENDA-SE ter um
-Pod de gateway nos nós que podem anunciar o VIP; caso contrário, uma falha ou
-ausência de Pod local pode indisponibilizar a entrada.
+A `AuthorizationPolicy` nativa do Istio não pode apontar diretamente para um
+`HTTPRoute`. Para obter isolamento por rota, a demonstração usa a primeira
+opção: OPA/Rego dentro da `AuthPolicy` do RHCL.
 
-Como o cliente se conecta diretamente ao VIP neste desenho, a política usa
-`ipBlocks`, que avalia o endereço remoto da conexão.
+## Implementação validada no HTTPRoute
 
-## Manifestos e ordem de aplicação
+O `AuthPolicy` já existente para JWT e roles recebeu uma segunda regra de
+autorização, chamada `source-cidr`. O Authorino recebe o endereço remoto no
+pedido de autorização; no ambiente validado o valor IPv4 contém `IP:porta`, por
+isso a regra separa a porta antes de avaliar o CIDR.
 
-1. `00b-metallb-operator.yaml` instala o operador MetalLB no namespace
-   `metallb-system`.
-2. `01a-metallb.yaml` cria a instância, o `IPAddressPool` e o
-   `L2Advertisement`. Ajuste o intervalo do pool para a rede do seu ambiente.
-3. `03-hello-gateway.yaml` solicita um `LoadBalancer` para o Gateway e associa
-   o serviço ao pool por `metallb.io/address-pool`.
-4. `03b-gateway-loadbalancer.yaml` aplica `externalTrafficPolicy: Local` ao
-   serviço que o controller Istio gera, usando server-side apply.
-5. `05-source-cidr-authorization.yaml` aplica a allowlist no Gateway.
+```yaml
+authorization:
+  endpoint-role:
+    opa:
+      rego: |
+        allow {
+          input.request.path == "/blue"
+          input.auth.identity.realm_access.roles[_] == "blue"
+        }
 
-O exemplo abaixo é ilustrativo; use apenas endereços aprovados para o ambiente.
-Um `/32` é um IP individual, e um prefixo menor cobre uma rede:
+        allow {
+          input.request.path == "/red"
+          input.auth.identity.realm_access.roles[_] == "red"
+        }
+  source-cidr:
+    opa:
+      rego: |
+        source_address := input.context.source.address.Address.SocketAddress.address
+        source_ip := split(source_address, ":")[0]
+
+        allow {
+          net.cidr_contains("198.51.100.18/32", source_ip)
+        }
+
+        allow {
+          net.cidr_contains("203.0.113.0/24", source_ip)
+        }
+```
+
+As regras de autorização são cumulativas. A requisição precisa satisfazer a
+allowlist de origem e a regra de role. Para uma nova API sem JWT, uma
+`AuthPolicy` pode conter somente a regra `source-cidr` e a resposta 403.
+
+O manifesto da demonstração mantém essa regra em
+`manifests/04-authpolicy.yaml`. O endereço presente nele é específico do
+laboratório e NÃO DEVE ser reutilizado.
+
+## Alternativa no Gateway
+
+Quando todas as rotas de um Gateway devem receber a mesma allowlist, use a
+política nativa do Istio:
 
 ```yaml
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
-  name: example-source-cidr
+  name: example-gateway-source-cidr
   namespace: api
 spec:
   targetRef:
@@ -68,70 +91,50 @@ spec:
   rules:
     - from:
         - source:
-            ipBlocks:
+            remoteIpBlocks:
               - 198.51.100.18/32
               - 203.0.113.0/24
 ```
 
-Uma `AuthorizationPolicy` com `action: ALLOW` nega toda origem que não case
-com uma regra aplicável. O IP de teste presente no manifesto deste repositório
-é específico do laboratório e NÃO DEVE ser reutilizado.
+Com `action: ALLOW`, origens que não correspondem à lista são negadas. Essa
+alternativa não foi mantida na demonstração porque bloquearia qualquer outra
+rota que compartilhasse o Gateway.
 
-Após a criação do Gateway, aplique a configuração do serviço gerado assim:
+## Validação
 
-```bash
-oc apply -f manifests/03-hello-gateway.yaml
-oc apply --server-side -f manifests/03b-gateway-loadbalancer.yaml
-oc apply -f manifests/05-source-cidr-authorization.yaml
-```
-
-## DNS, consumo e validação
-
-Associe o hostname do `HTTPRoute` ao VIP no DNS. Enquanto o DNS não estiver
-publicado, `curl --resolve` permite testar a combinação de VIP e host sem mudar
-`/etc/hosts`:
+Associe o hostname do `HTTPRoute` ao VIP no DNS. Para testar antes da
+propagação de DNS, use `curl --resolve`:
 
 ```bash
 export API_HOST=hello-rbac.api.example.com
 export GATEWAY_VIP=192.0.2.50
 
-oc get svc hello-gateway-istio -n hello-rbac
-oc get ipaddresspool,l2advertisement -n metallb-system
-oc get gateway hello-gateway -n hello-rbac
-
 curl --resolve "${API_HOST}:80:${GATEWAY_VIP}" -i \
   -H "Authorization: Bearer $TOKEN" "http://${API_HOST}/blue" # 200
-curl --resolve "${API_HOST}:80:${GATEWAY_VIP}" -i \
-  -H "Authorization: Bearer $TOKEN" "http://${API_HOST}/red"  # 403 (role)
-curl --resolve "${API_HOST}:80:${GATEWAY_VIP}" -i \
-  "http://${API_HOST}/blue" # 401 (JWT)
 ```
 
-Repita a chamada autenticada a partir de uma rede fora da lista. O resultado
-esperado é 403. A validação deve incluir uma origem permitida e uma não
-permitida: testar apenas JWT ou role inválidos não prova a restrição de rede.
+A validação deve conter pelo menos estes cenários:
 
-Se o VIP não responder, confirme primeiro se o `Service` contém
-`EXTERNAL-IP`, se há um `ServiceL2Status` para o serviço e se o IP do pool é
-alcançável a partir da rede do consumidor. Se a origem esperada recebe 403,
-confirme `externalTrafficPolicy: Local`, os Pods de gateway locais e o IP visto
-na conexão; não amplie o CIDR sem identificar a causa.
+| Origem | Credencial | Resultado esperado |
+|---|---|---:|
+| Permitida | JWT válido com role correta | 200 |
+| Fora da allowlist | Mesmo JWT válido | 403 |
+| Permitida | Sem JWT | 401 |
 
-## Segurança e suporte
+## Limitações e operação
 
-Esta PoC usa HTTP para focalizar o controle de origem. Em produção, o Gateway
-DEVE expor HTTPS, usar certificado administrado e ter o DNS do hostname apontado
-para o VIP. MetalLB fornece a exposição L4; autenticação JWT, roles e políticas
-continuam no Gateway/RHCL.
-
-O MetalLB Operator do OpenShift 4.22 é a fonte normativa para instalação, pool
-e anúncios. A documentação upstream do Istio fundamenta o uso de
-`externalTrafficPolicy: Local` com `ipBlocks` quando o balanceador L4 preserva
-o IP de origem. Valide a topologia de rede, a disponibilidade e o modelo de
-anúncio L2/BGP com a equipe de plataforma antes de produção.
+- A extração Rego apresentada foi validada para IPv4. Para IPv6, implemente e
+  teste uma extração de endereço compatível com o formato recebido pelo
+  Authorino antes de promover para produção.
+- `externalTrafficPolicy: Local` continua necessário para preservar a origem
+  em um caminho de rede que entrega o VIP por balanceamento L4.
+- Não use `0.0.0.0/0`: isso elimina a restrição de origem.
+- Mantenha os CIDRs aprovados, pequenos e revisados; NAT, VPN e proxies podem
+  alterar o endereço percebido pela política.
 
 ## Referências
 
-- [OpenShift 4.22 — MetalLB Operator](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/networking_operators/metallb-operator) — Red Hat, 4.22, consultado em 2026-09-23.
-- [OpenShift 4.22 — anúncios L2 do MetalLB](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html-single/ingress_and_load_balancing/index) — Red Hat, 4.22, consultado em 2026-09-23.
-- [Istio — controle de acesso no ingress](https://istio.io/latest/docs/tasks/security/authorization/authz-ingress/) — upstream, consultado em 2026-09-23.
+- [RHCL 1.4 — autenticação OIDC e AuthPolicy](https://docs.redhat.com/en/documentation/red_hat_connectivity_link/1.4/html/deploy_red_hat_connectivity_link/rhcl-oidc-authentication) — Red Hat, 1.4, consultado em 2026-09-23.
+- [Kuadrant 1.4 — AuthPolicy para desenvolvedores e plataforma](https://docs.kuadrant.io/1.4.x/kuadrant-operator/doc/user-guides/auth/auth-for-app-devs-and-platform-engineers/) — documentação community, consultada em 2026-09-23.
+- [Authorino — autorização OPA](https://docs.kuadrant.io/1.4.x/authorino/docs/user-guides/opa-authorization/) — documentação community, consultada em 2026-09-23.
+- [Istio — políticas de autorização no ingress](https://istio.io/latest/docs/tasks/security/authorization/authz-ingress/) — upstream, consultado em 2026-09-23.
