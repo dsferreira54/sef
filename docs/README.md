@@ -18,6 +18,15 @@ Material de apoio:
 - [Arquitetura e decisões](architecture.md)
 - [Matriz de rastreabilidade](traceability.md)
 
+## Manuais autocontidos para compartilhamento
+
+Os arquivos abaixo podem ser enviados isoladamente para uma equipe cliente. Cada
+um contém seus próprios pré-requisitos, passos, comandos e YAMLs, sem depender
+de arquivos deste repositório:
+
+- [OIDC/JWT e roles por endpoint](standalone-guides/01-oidc-jwt-rbac.md)
+- [VIP MetalLB e allowlist IP/CIDR](standalone-guides/02-metallb-vip-source-cidr.md)
+
 Os manifestos em [../manifests](../manifests/) seguem a ordem numérica. Segredos
 nunca são versionados; nomes de host e endereços de laboratório devem ser
 substituídos em qualquer outro ambiente.
