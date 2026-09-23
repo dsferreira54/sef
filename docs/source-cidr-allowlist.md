@@ -7,6 +7,9 @@ O `HTTPRoute` `hello-rbac` é publicado diretamente por um VIP do MetalLB. A
 nega origens que não pertencem à allowlist, sem alteração no `Deployment`,
 `Service` da aplicação ou código.
 
+Este é o guia da segunda entrega e pressupõe a configuração de realm, cliente,
+JWT e roles descrita em [OIDC/JWT e RBAC por endpoint](jwt-rbac.md).
+
 ```mermaid
 flowchart LR
   C[Cliente] -->|HTTP + Host| V[VIP MetalLB]

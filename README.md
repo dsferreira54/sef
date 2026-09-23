@@ -7,8 +7,10 @@ publicado diretamente por um VIP MetalLB, com `AuthorizationPolicy` do Istio e
 `AuthPolicy` do Red Hat Connectivity Link (RHCL), sem alteração do código da
 aplicação.
 
-Comece por [docs/README.md](docs/README.md), incluindo o guia de
-[allowlist de IP/CIDR](docs/source-cidr-allowlist.md). Os manifestos são
+Comece pelo [índice da documentação](docs/README.md). Os guias da
+[primeira entrega — JWT/RBAC](docs/jwt-rbac.md) e da
+[segunda entrega — MetalLB/IP/CIDR](docs/source-cidr-allowlist.md) são
+independentes e conectados por links de pré-requisito. Os manifestos são
 aplicados em ordem numérica em [manifests](manifests/).
 
 > Os valores de `Secret` nunca são versionados. O hostname nos manifestos é
