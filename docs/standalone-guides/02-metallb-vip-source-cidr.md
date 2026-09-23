@@ -12,16 +12,18 @@ Cliente → VIP MetalLB → Gateway Istio → HTTPRoute → Serviço existente
 ```
 
 Não é necessário mudar código, imagem, `Deployment` ou `Service` da aplicação.
-Este manual usa OpenShift 4.22, OpenShift Service Mesh 3.4/Istio e o MetalLB
-Operator do OpenShift, em uma rede interna onde o VIP já é alcançável pelos
-consumidores.
+Este manual pressupõe OpenShift 4.22, OpenShift Service Mesh 3.4/Istio e
+MetalLB já instalados e operacionais, em uma rede interna onde o VIP já é
+alcançável pelos consumidores.
 
 ## Antes de começar
 
 Você precisa ter:
 
-- Acesso `cluster-admin` para instalar/configurar MetalLB e criar recursos de
-  rede.
+- Permissões para criar e alterar recursos de rede no namespace do MetalLB e
+  no namespace da API.
+- MetalLB Operator e a instância `MetalLB` já em operação no namespace
+  `metallb-system`.
 - Um Gateway Istio e um `HTTPRoute` funcionais para a API existente.
 - Uma faixa de IPs reservada pela equipe de rede, na mesma rede L2 dos nós que
   anunciarão o VIP. O endereço NÃO DEVE pertencer ao DHCP nem estar em uso.
@@ -44,6 +46,7 @@ Confirme o estado atual:
 ```bash
 oc get gatewayclass
 oc -n orders-api get gateway,httproute
+oc -n metallb-system get metallb
 oc get nodes -o wide
 ```
 
@@ -59,60 +62,13 @@ Se houver vários nós, RECOMENDA-SE executar réplicas do Gateway nos nós que
 podem anunciar o VIP. Com `externalTrafficPolicy: Local`, enviar tráfego a um
 nó sem Pod local do Gateway pode causar indisponibilidade.
 
-## Passo 1 — Instalar o MetalLB Operator
-
-Se o MetalLB já estiver instalado e saudável, pule para o passo 2. Caso
-contrário, aplique o YAML abaixo:
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: metallb-system
-  labels:
-    openshift.io/cluster-monitoring: "true"
----
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: metallb-operator
-  namespace: metallb-system
----
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: metallb-operator
-  namespace: metallb-system
-spec:
-  channel: stable
-  installPlanApproval: Automatic
-  name: metallb-operator
-  source: redhat-operators
-  sourceNamespace: openshift-marketplace
-```
-
-Salve como `metallb-operator.yaml` e aplique:
-
-```bash
-oc apply -f metallb-operator.yaml
-oc -n metallb-system get csv,subscription
-```
-
-Espere o CSV do MetalLB ficar em `Succeeded` antes de continuar.
-
-## Passo 2 — Criar instância, pool e anúncio L2
+## Passo 1 — Criar pool e anúncio L2
 
 O pool abaixo contém apenas um VIP e restringe sua atribuição ao namespace da
 API. Ajuste `addresses` para o VIP reservado pelo cliente. O selector do anúncio
 garante que somente o serviço daquele Gateway use esse pool.
 
 ```yaml
-apiVersion: metallb.io/v1beta1
-kind: MetalLB
-metadata:
-  name: metallb
-  namespace: metallb-system
----
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -143,10 +99,10 @@ Salve como `orders-metallb.yaml` e aplique:
 
 ```bash
 oc apply -f orders-metallb.yaml
-oc -n metallb-system get metallb,ipaddresspool,l2advertisement
+oc -n metallb-system get ipaddresspool,l2advertisement
 ```
 
-## Passo 3 — Solicitar LoadBalancer para o Gateway
+## Passo 2 — Solicitar LoadBalancer para o Gateway
 
 Adicione as partes abaixo ao recurso `Gateway` existente. Mantenha os listeners
 e demais configurações já usados pela API.
@@ -198,7 +154,7 @@ oc -n orders-api get service \
 Normalmente o nome é `<nome-do-gateway>-istio`, mas use o nome retornado pelo
 comando no passo seguinte.
 
-## Passo 4 — Preservar o IP de origem
+## Passo 3 — Preservar o IP de origem
 
 O controller Istio cria o `Service` do Gateway. Aplique este patch com
 server-side apply para definir `externalTrafficPolicy: Local` sem alterar as
@@ -224,7 +180,7 @@ oc -n orders-api get service orders-gateway-istio
 
 O serviço deve mostrar `TYPE=LoadBalancer` e o VIP em `EXTERNAL-IP`.
 
-## Passo 5 — Aplicar a allowlist IP/CIDR
+## Passo 4 — Aplicar a allowlist IP/CIDR
 
 Crie uma `AuthorizationPolicy` apontando para o Gateway. Um `/32` representa
 um IP individual. Um prefixo, como `/24`, representa uma rede inteira.
@@ -260,7 +216,7 @@ Uma política com `action: ALLOW` bloqueia qualquer origem que não corresponda 
 uma regra. Se a API também exige JWT, o bloqueio por IP ocorre antes da decisão
 de autenticação/autorização da API.
 
-## Passo 6 — Configurar DNS e testar
+## Passo 5 — Configurar DNS e testar
 
 Crie um registro DNS interno para `orders-api.internal.example.com` apontando
 para `192.168.100.50`. Enquanto ele não estiver disponível, informe o hostname

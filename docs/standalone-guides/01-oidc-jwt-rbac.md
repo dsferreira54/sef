@@ -17,9 +17,9 @@ Cliente → Gateway Istio → RHCL/Authorino → Serviço existente
                          ↘ Keycloak (descoberta OIDC e chaves públicas)
 ```
 
-Este manual usa OpenShift Service Mesh 3.4, Red Hat Connectivity Link (RHCL)
-1.4 e Red Hat build of Keycloak (RHBK). Os nomes são exemplos: ajuste-os antes
-de aplicar no ambiente.
+Este manual pressupõe OpenShift Service Mesh 3.4, Red Hat Connectivity Link
+(RHCL) 1.4 e Red Hat build of Keycloak (RHBK) já instalados e operacionais. Os
+nomes são exemplos: ajuste-os antes de aplicar no ambiente.
 
 ## Antes de começar
 
