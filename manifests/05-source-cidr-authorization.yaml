@@ -1,0 +1,51 @@
+# Enforce the source-address allowlist at the Istio Gateway before RHCL
+# delegates JWT and role decisions to Authorino.
+#
+# Replace the entry below with the approved IPv4 addresses/CIDR blocks observed
+# at this gateway in each environment. A /32 represents one individual address.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: hello-rbac-source-cidr
+  namespace: hello-rbac
+  labels:
+    app.kubernetes.io/part-of: hello-rbac-demo
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: hello-gateway
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            remoteIpBlocks:
+              - 100.64.0.26/32
+---
+# The gateway is a ClusterIP service and only the OpenShift router may reach
+# its HTTP listener. This preserves the XFF trust boundary used above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hello-gateway-ingress-boundary
+  namespace: hello-rbac
+  labels:
+    app.kubernetes.io/part-of: hello-rbac-demo
+spec:
+  podSelector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: hello-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-ingress
+      ports:
+        - protocol: TCP
+          port: 80
+    # Keep the gateway health endpoint reachable for platform probes.
+    - ports:
+        - protocol: TCP
+          port: 15021

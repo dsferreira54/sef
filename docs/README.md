@@ -1,13 +1,16 @@
-# Guia de implementação: JWT e roles sem alterar a aplicação
+# Guia de implementação: JWT, roles e IP/CIDR sem alterar a aplicação
 
 ## Resultado
 
 O ambiente demonstrado publica uma aplicação HTTP simples em dois endpoints:
 
-| Endpoint | Role JWT exigida | Sem token | Role errada | Role correta |
-|---|---|---:|---:|---:|
-| `GET /blue` | `blue` | 401 | 403 | 200 |
-| `GET /red` | `red` | 401 | 403 | 200 |
+| Condição | Resultado esperado |
+|---|---:|
+| Origem fora da allowlist, mesmo com JWT e role válidos | 403 |
+| Origem permitida, sem token | 401 |
+| Origem permitida, `blue` em `GET /blue` | 200 |
+| Origem permitida, `blue` em `GET /red` | 403 |
+| Origem permitida, `red` em `GET /red` | 200 |
 
 A aplicação executa uma imagem HTTP genérica e não contém biblioteca, filtro,
 configuração ou linha de código de autenticação. O gateway recebe a requisição,
@@ -22,9 +25,12 @@ a recomendação oficial para a linha 1.4 é usar 1.4.1 ou posterior.
 
 ```mermaid
 flowchart LR
-  C[Consumidor] -->|JWT Bearer| R[OpenShift Route/TLS]
+  C[Consumidor] -->|JWT Bearer + IP| R[OpenShift Route/TLS]
   R --> G[Istio Gateway]
-  G -->|ext_authz| A[RHCL / Authorino]
+  G -->|allowlist remoteIpBlocks| I[Istio AuthorizationPolicy]
+  I -->|origem permitida| A
+  I -->|origem bloqueada: 403| C
+  I -->|ext_authz| A[RHCL / Authorino]
   A -->|OIDC discovery + JWKS| K[Red Hat build of Keycloak]
   A -->|allow| H[HTTPRoute]
   H --> S[Service Hello World]
@@ -35,8 +41,8 @@ O `Route` só fornece a borda pública TLS. O `Gateway` e o `HTTPRoute` são os
 recursos Gateway API efetivamente protegidos; o `AuthPolicy` fica no mesmo
 namespace do `HTTPRoute` e aponta para ele com `targetRef`.
 
-Leia também [arquitetura e decisões](architecture.md) e a
-[matriz de rastreabilidade](traceability.md).
+Leia também o guia de [allowlist de IP/CIDR](source-cidr-allowlist.md),
+[arquitetura e decisões](architecture.md) e a [matriz de rastreabilidade](traceability.md).
 
 ## Ordem de instalação
 
@@ -52,6 +58,8 @@ Os manifestos foram aplicados nesta ordem:
 5. `03-hello-gateway.yaml` cria aplicação, `Service`, `Gateway`, `HTTPRoute`
    e a borda Route.
 6. `04-authpolicy.yaml` aplica validação OIDC e RBAC no `HTTPRoute`.
+7. `05-source-cidr-authorization.yaml` aplica a allowlist de origem no
+   `Gateway` e fecha o listener HTTP direto com `NetworkPolicy`.
 
 Em outro ambiente, troque os hosts `apps...` nos manifestos por nomes do seu
 domínio. Crie segredos fora do Git (GitOps com External Secrets, Sealed Secrets
@@ -136,6 +144,11 @@ oc logs -n kuadrant-system -l authorino-resource=authorino --tail=100
   certificados, alta disponibilidade para Keycloak e banco PostgreSQL externo.
 - O predicado OPA é deliberadamente fechado: qualquer caminho fora de `/blue` e
   `/red`, role ausente ou claim incompatível é negado.
+- A restrição de IP/CIDR é implementada antes do RHCL e é independente do JWT.
+  O procedimento, limitações de topologia e a validação estão no
+  [guia específico](source-cidr-allowlist.md). Em Service Mesh 3.4.2, a
+  configuração de topologia de gateway é Developer Preview; trate esta PoC como
+  validação técnica e confirme a alternativa suportada para produção.
 
 ## Referências
 
