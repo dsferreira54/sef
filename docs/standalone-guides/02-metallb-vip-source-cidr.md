@@ -1,189 +1,72 @@
-# Manual de implementação: VIP MetalLB e allowlist de IP/CIDR no Gateway
+# Manual de implementação: allowlist de IP/CIDR no Gateway exposto por VIP MetalLB
 
 ## O que este manual entrega
 
-Ao final, um `HTTPRoute` existente será acessado diretamente por um VIP do
-MetalLB. Antes de a requisição chegar ao backend, o Gateway Istio permitirá
-somente IPs ou blocos CIDR aprovados.
+Ao final, o `HTTPRoute` de uma API já publicada por um VIP do MetalLB aceitará
+somente chamadas originadas em IPs ou blocos CIDR aprovados. A decisão acontece
+no Gateway Istio, antes de a chamada chegar ao backend.
 
 ```text
-Cliente → VIP MetalLB → Gateway Istio → HTTPRoute → Serviço existente
-                    └→ AuthorizationPolicy: permite ou responde 403
+Cliente → VIP MetalLB já existente → Gateway Istio → HTTPRoute → Serviço existente
+                                  └→ AuthorizationPolicy: permite ou responde 403
 ```
 
-Não é necessário mudar código, imagem, `Deployment` ou `Service` da aplicação.
-Este manual pressupõe OpenShift 4.22, OpenShift Service Mesh 3.4/Istio e
-MetalLB já instalados e operacionais, em uma rede interna onde o VIP já é
-alcançável pelos consumidores.
+Não é necessário alterar código, imagem, `Deployment`, `Service` nem a
+publicação já existente da aplicação. Este manual trata exclusivamente da
+política de acesso por origem.
 
 ## Antes de começar
 
+Este manual pressupõe que o Gateway, o `HTTPRoute`, o `Service` e o VIP MetalLB
+já estão funcionando no ambiente do cliente. A equipe de plataforma/rede deve
+confirmar que o IP original do consumidor chega ao Gateway sem ser substituído
+por outro IP. A política compara esse IP que o Gateway recebe.
+
 Você precisa ter:
 
-- Permissões para criar e alterar recursos de rede no namespace do MetalLB e
-  no namespace da API.
-- MetalLB Operator e a instância `MetalLB` já em operação no namespace
-  `metallb-system`.
-- Um Gateway Istio e um `HTTPRoute` funcionais para a API existente.
-- Uma faixa de IPs reservada pela equipe de rede, na mesma rede L2 dos nós que
-  anunciarão o VIP. O endereço NÃO DEVE pertencer ao DHCP nem estar em uso.
-- DNS interno para apontar o hostname da API ao VIP. Enquanto DNS não estiver
-  pronto, os testes podem usar `curl --resolve`.
+- Permissão para criar uma `AuthorizationPolicy` no namespace da API.
+- O nome do namespace e do `Gateway` que já publica a API.
+- O hostname interno e o VIP já associados à API.
+- A lista de IPs ou redes CIDR aprovada pela equipe de segurança.
 
-Use estes nomes de exemplo e substitua todos antes da aplicação:
+Use estes nomes de exemplo e substitua todos antes de aplicar:
 
 | Item | Exemplo |
 |---|---|
 | Namespace da API | `orders-api` |
-| Gateway | `orders-gateway` |
-| Serviço gerado pelo Gateway | `orders-gateway-istio` |
+| Gateway existente | `orders-gateway` |
+| HTTPRoute existente | `orders-api` |
 | Host da API | `orders-api.internal.example.com` |
-| VIP reservado | `192.168.100.50` |
+| VIP já publicado | `192.168.100.50` |
 | Rede autorizada | `192.168.10.0/24` |
 
-Confirme o estado atual:
+Faça a verificação inicial. Ela confirma que o Gateway e a rota já existem;
+ela não altera a configuração de publicação do VIP.
 
 ```bash
-oc get gatewayclass
-oc -n orders-api get gateway,httproute
-oc -n metallb-system get metallb
-oc get nodes -o wide
+oc -n orders-api get gateway orders-gateway
+oc -n orders-api get httproute orders-api
 ```
 
-## Como a solução funciona
+## Como a política funciona
 
-O MetalLB anuncia um VIP de camada 2 para um `Service` do tipo `LoadBalancer`.
-O Gateway Istio recebe a conexão diretamente nesse VIP. A opção
-`externalTrafficPolicy: Local` preserva o endereço de origem até o Gateway;
-por isso a `AuthorizationPolicy` usa `ipBlocks` para comparar o IP remoto com a
-lista permitida.
+Uma `AuthorizationPolicy` com `action: ALLOW` se torna uma allowlist: uma
+chamada só é permitida se corresponder a pelo menos uma regra. O campo
+`ipBlocks` aceita tanto IPs individuais quanto redes CIDR:
 
-Se houver vários nós, RECOMENDA-SE executar réplicas do Gateway nos nós que
-podem anunciar o VIP. Com `externalTrafficPolicy: Local`, enviar tráfego a um
-nó sem Pod local do Gateway pode causar indisponibilidade.
+| Valor | Significado |
+|---|---|
+| `192.168.20.15/32` | Apenas o IP `192.168.20.15` |
+| `192.168.10.0/24` | Endereços de `192.168.10.0` a `192.168.10.255` |
 
-## Passo 1 — Criar pool e anúncio L2
+Se a API também usa JWT e roles, a origem fora da allowlist recebe `403` antes
+da decisão de autenticação/autorização da API. Para uma origem permitida, as
+demais políticas continuam valendo normalmente.
 
-O pool abaixo contém apenas um VIP e restringe sua atribuição ao namespace da
-API. Ajuste `addresses` para o VIP reservado pelo cliente. O selector do anúncio
-garante que somente o serviço daquele Gateway use esse pool.
+## Passo 1 — Criar a allowlist IP/CIDR
 
-```yaml
-apiVersion: metallb.io/v1beta1
-kind: IPAddressPool
-metadata:
-  name: orders-gateway-vip
-  namespace: metallb-system
-spec:
-  addresses:
-    - 192.168.100.50-192.168.100.50
-  autoAssign: false
-  serviceAllocation:
-    namespaces:
-      - orders-api
----
-apiVersion: metallb.io/v1beta1
-kind: L2Advertisement
-metadata:
-  name: orders-gateway-vip
-  namespace: metallb-system
-spec:
-  ipAddressPools:
-    - orders-gateway-vip
-  serviceSelectors:
-    - matchLabels:
-        gateway.networking.k8s.io/gateway-name: orders-gateway
-```
-
-Salve como `orders-metallb.yaml` e aplique:
-
-```bash
-oc apply -f orders-metallb.yaml
-oc -n metallb-system get ipaddresspool,l2advertisement
-```
-
-## Passo 2 — Solicitar LoadBalancer para o Gateway
-
-Adicione as partes abaixo ao recurso `Gateway` existente. Mantenha os listeners
-e demais configurações já usados pela API.
-
-```yaml
-metadata:
-  annotations:
-    networking.istio.io/service-type: LoadBalancer
-spec:
-  infrastructure:
-    annotations:
-      metallb.io/address-pool: orders-gateway-vip
-```
-
-Como referência, este é um Gateway completo e mínimo:
-
-```yaml
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: orders-gateway
-  namespace: orders-api
-  labels:
-    kuadrant.io/gateway: "true"
-  annotations:
-    networking.istio.io/service-type: LoadBalancer
-spec:
-  gatewayClassName: istio
-  infrastructure:
-    annotations:
-      metallb.io/address-pool: orders-gateway-vip
-  listeners:
-    - name: http
-      hostname: orders-api.internal.example.com
-      port: 80
-      protocol: HTTP
-      allowedRoutes:
-        namespaces:
-          from: Same
-```
-
-Depois de aplicar o Gateway, descubra o serviço gerado pelo controller Istio:
-
-```bash
-oc -n orders-api get service \
-  -l gateway.networking.k8s.io/gateway-name=orders-gateway
-```
-
-Normalmente o nome é `<nome-do-gateway>-istio`, mas use o nome retornado pelo
-comando no passo seguinte.
-
-## Passo 3 — Preservar o IP de origem
-
-O controller Istio cria o `Service` do Gateway. Aplique este patch com
-server-side apply para definir `externalTrafficPolicy: Local` sem alterar as
-portas e selectors gerados pelo controller:
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: orders-gateway-istio
-  namespace: orders-api
-spec:
-  type: LoadBalancer
-  externalTrafficPolicy: Local
-```
-
-Salve como `orders-gateway-service.yaml` e aplique:
-
-```bash
-oc apply --server-side -f orders-gateway-service.yaml
-oc -n orders-api get service orders-gateway-istio
-```
-
-O serviço deve mostrar `TYPE=LoadBalancer` e o VIP em `EXTERNAL-IP`.
-
-## Passo 4 — Aplicar a allowlist IP/CIDR
-
-Crie uma `AuthorizationPolicy` apontando para o Gateway. Um `/32` representa
-um IP individual. Um prefixo, como `/24`, representa uma rede inteira.
+Crie a política abaixo no mesmo namespace do Gateway. Troque os valores de
+`namespace`, `name` e `ipBlocks` pelos valores aprovados no ambiente.
 
 ```yaml
 apiVersion: security.istio.io/v1
@@ -212,59 +95,70 @@ oc apply -f orders-source-cidr.yaml
 oc -n orders-api get authorizationpolicy orders-gateway-source-cidr
 ```
 
-Uma política com `action: ALLOW` bloqueia qualquer origem que não corresponda a
-uma regra. Se a API também exige JWT, o bloqueio por IP ocorre antes da decisão
-de autenticação/autorização da API.
+Para acrescentar uma origem, inclua outro item em `ipBlocks` e reaplique o
+YAML. Para revogar uma origem, remova apenas o item correspondente e reaplique.
+NÃO use `0.0.0.0/0`: isso desativa a restrição de origem.
 
-## Passo 5 — Configurar DNS e testar
+## Passo 2 — Testar diretamente no VIP existente
 
-Crie um registro DNS interno para `orders-api.internal.example.com` apontando
-para `192.168.100.50`. Enquanto ele não estiver disponível, informe o hostname
-e o VIP diretamente ao `curl`:
+O DNS interno deve resolver `orders-api.internal.example.com` para o VIP já
+publicado. Faça a chamada a partir de uma máquina dentro de uma rede permitida:
+
+```bash
+export API_URL=http://orders-api.internal.example.com
+export TOKEN='cole-aqui-um-jwt-valido-se-a-api-exigir-autenticacao'
+
+curl -i \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "${API_URL}/blue"
+```
+
+Caso o DNS ainda não esteja disponível para a máquina de teste, informe o
+hostname e o VIP diretamente ao `curl`, sem modificar a máquina:
 
 ```bash
 export API_HOST=orders-api.internal.example.com
 export VIP=192.168.100.50
-export TOKEN='cole-aqui-um-jwt-valido-se-a-api-exigir-autenticacao'
 
 curl --resolve "${API_HOST}:80:${VIP}" -i \
   -H "Authorization: Bearer ${TOKEN}" \
   "http://${API_HOST}/blue"
 ```
 
-Execute a matriz abaixo usando um token válido, se a API estiver protegida por
-JWT:
+Execute a matriz de testes com o mesmo token válido:
 
 | Origem da chamada | Resultado esperado |
 |---|---:|
-| IP ou rede presente em `ipBlocks` e credenciais válidas | 200 |
-| IP ou rede fora de `ipBlocks`, com as mesmas credenciais válidas | 403 |
+| IP ou rede presente em `ipBlocks` | 200, se as demais políticas também permitirem |
+| IP ou rede fora de `ipBlocks` | 403 |
 | IP permitido, sem credenciais exigidas pela API | 401 |
 
-Valide o anúncio do VIP quando houver problema de conectividade:
+O teste de bloqueio DEVE ser feito a partir de uma origem realmente fora da
+allowlist. Alterar somente o token não valida a restrição por IP.
+
+## Diagnóstico
+
+Confira se a política existe e se está apontando para o Gateway correto:
 
 ```bash
-oc -n orders-api get service orders-gateway-istio
-oc -n metallb-system get servicel2status
-oc -n metallb-system get pods
+oc -n orders-api get authorizationpolicy orders-gateway-source-cidr -o yaml
+oc -n orders-api get gateway orders-gateway
+oc -n orders-api get httproute orders-api
 ```
-
-## Problemas comuns
 
 | Sintoma | Causa provável | Ação |
 |---|---|---|
-| `EXTERNAL-IP` fica pendente | Pool, anúncio ou selector não corresponde ao serviço | Confira `IPAddressPool`, `L2Advertisement`, labels do serviço e annotation `metallb.io/address-pool`. |
-| VIP não responde | VIP não é roteável, não está na rede L2 dos nós ou DNS aponta para outro IP | Valide a reserva com a rede e `ServiceL2Status`. |
-| Origem permitida recebe 403 | IP percebido pelo Gateway não pertence ao CIDR ou o IP foi mascarado antes de chegar ao cluster | Confirme `externalTrafficPolicy: Local` e identifique a origem real antes de ampliar a lista. |
-| Parte dos acessos falha em cluster com vários nós | Nó anunciado não tem Pod local do Gateway | Escale/posicione o Gateway nos nós anunciadores ou reveja o modelo de anúncio. |
+| Origem permitida recebe 403 | O IP que chega ao Gateway é diferente do esperado, a rede não está no CIDR ou há outra política restritiva | Confirme com a equipe de rede o IP de origem observado pelo Gateway e revise todas as `AuthorizationPolicy` do namespace. |
+| Origem fora da lista recebe 200 | A política aponta para outro Gateway, não foi aplicada no namespace correto ou existe uma configuração inesperada no caminho | Confira `targetRef`, namespace e a política efetivamente aplicada. |
+| A chamada não chega à política | Hostname, listener, `HTTPRoute` ou VIP já existente está incorreto | Valide o Gateway, o `HTTPRoute`, o DNS interno e a conectividade até o VIP com a equipe responsável. |
+| Origem permitida recebe 401 | A allowlist funcionou, mas a API exige JWT ou outra credencial | Obtenha uma credencial válida e repita o teste. |
 
 ## Recomendações para produção
 
-- Use um VIP reservado e documentado pela equipe de rede; NÃO use uma faixa
-  DHCP ou um IP que possa ser reutilizado.
-- Para alta disponibilidade, defina a estratégia de anúncio L2 ou BGP junto à
-  equipe de rede e mantenha Gateways nos nós anunciadores.
-- Use HTTPS no Gateway, certificado administrado e DNS interno apontando para o
-  VIP. MetalLB expõe o serviço em L4; ele não substitui TLS nem autenticação.
-- Mantenha `ipBlocks` pequeno e revisado. Mudanças de NAT, VPN ou proxy podem
-  alterar o IP percebido pelo Gateway e devem passar por controle de mudança.
+- Mantenha `ipBlocks` pequeno, específico e aprovado pela segurança. Prefira
+  `/32` quando a origem for fixa.
+- Registre o responsável, a justificativa e a data de revisão de cada CIDR.
+- Antes de ampliar uma rede, identifique se VPN, NAT ou proxy mudou o IP que o
+  Gateway recebe.
+- Use HTTPS no Gateway e mantenha JWT, roles e allowlist como camadas
+  complementares de proteção.
