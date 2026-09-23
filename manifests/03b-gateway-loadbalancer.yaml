@@ -1,0 +1,10 @@
+# The Istio Gateway controller owns this Service. This server-side apply patch
+# retains the client source address when traffic reaches the MetalLB VIP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-gateway-istio
+  namespace: hello-rbac
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local

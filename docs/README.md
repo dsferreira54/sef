@@ -25,9 +25,9 @@ a recomendação oficial para a linha 1.4 é usar 1.4.1 ou posterior.
 
 ```mermaid
 flowchart LR
-  C[Consumidor] -->|JWT Bearer + IP| R[OpenShift Route/TLS]
-  R --> G[Istio Gateway]
-  G -->|allowlist remoteIpBlocks| I[Istio AuthorizationPolicy]
+  C[Consumidor] -->|JWT Bearer + IP| M[VIP MetalLB]
+  M --> G[Istio Gateway]
+  G -->|allowlist ipBlocks| I[Istio AuthorizationPolicy]
   I -->|origem permitida| A
   I -->|origem bloqueada: 403| C
   I -->|ext_authz| A[RHCL / Authorino]
@@ -37,9 +37,9 @@ flowchart LR
   A -->|401 ou 403| C
 ```
 
-O `Route` só fornece a borda pública TLS. O `Gateway` e o `HTTPRoute` são os
-recursos Gateway API efetivamente protegidos; o `AuthPolicy` fica no mesmo
-namespace do `HTTPRoute` e aponta para ele com `targetRef`.
+O `Service` `LoadBalancer` do Gateway recebe um VIP do MetalLB. O `Gateway` e o
+`HTTPRoute` são os recursos Gateway API efetivamente protegidos; o `AuthPolicy`
+fica no mesmo namespace do `HTTPRoute` e aponta para ele com `targetRef`.
 
 Leia também o guia de [allowlist de IP/CIDR](source-cidr-allowlist.md),
 [arquitetura e decisões](architecture.md) e a [matriz de rastreabilidade](traceability.md).
@@ -49,17 +49,21 @@ Leia também o guia de [allowlist de IP/CIDR](source-cidr-allowlist.md),
 Os manifestos foram aplicados nesta ordem:
 
 1. `00-operators.yaml` instala os operadores Service Mesh 3.4 e RHCL 1.4.
-2. `01-service-mesh.yaml` cria `IstioCNI` e o control plane Istio.
-3. `01b-connectivity-link.yaml` instancia o CR `Kuadrant`, que cria Authorino
+2. `00b-metallb-operator.yaml` instala o operador MetalLB.
+3. `01-service-mesh.yaml` cria `IstioCNI` e o control plane Istio.
+4. `01a-metallb.yaml` cria a instância MetalLB, o pool reservado e o anúncio L2.
+5. `01b-connectivity-link.yaml` instancia o CR `Kuadrant`, que cria Authorino
    e Limitador.
-4. Crie os `Secret`s do cliente e dos usuários, então aplique
+6. Crie os `Secret`s do cliente e dos usuários, então aplique
    `02-keycloak.yaml`. O `KeycloakRealmImport` requer estar no namespace que o
    operador Keycloak observa.
-5. `03-hello-gateway.yaml` cria aplicação, `Service`, `Gateway`, `HTTPRoute`
-   e a borda Route.
-6. `04-authpolicy.yaml` aplica validação OIDC e RBAC no `HTTPRoute`.
-7. `05-source-cidr-authorization.yaml` aplica a allowlist de origem no
-   `Gateway` e fecha o listener HTTP direto com `NetworkPolicy`.
+7. `03-hello-gateway.yaml` cria aplicação, `Service`, `Gateway` e `HTTPRoute`;
+   o serviço gerado para o gateway é `LoadBalancer`.
+8. `03b-gateway-loadbalancer.yaml` define `externalTrafficPolicy: Local` no
+   serviço gerado, preservando o endereço de origem.
+9. `04-authpolicy.yaml` aplica validação OIDC e RBAC no `HTTPRoute`.
+10. `05-source-cidr-authorization.yaml` aplica a allowlist de origem no
+    `Gateway`.
 
 Em outro ambiente, troque os hosts `apps...` nos manifestos por nomes do seu
 domínio. Crie segredos fora do Git (GitOps com External Secrets, Sealed Secrets
@@ -87,7 +91,8 @@ Defina hosts para seu ambiente e obtenha os dados sem imprimi-los:
 
 ```bash
 export KEYCLOAK_HOST=sso.apps.example.com
-export API_HOST=hello-rbac.apps.example.com
+export API_HOST=hello-rbac.api.example.com
+export GATEWAY_VIP=192.0.2.50
 export REALM=hello-rbac
 export CLIENT_ID="$(oc -n keycloak get secret hello-rbac-oidc-client -o jsonpath='{.data.client-id}' | base64 -d)"
 export CLIENT_SECRET="$(oc -n keycloak get secret hello-rbac-oidc-client -o jsonpath='{.data.client-secret}' | base64 -d)"
@@ -105,8 +110,10 @@ TOKEN="$(curl -fsS -X POST "https://${KEYCLOAK_HOST}/realms/${REALM}/protocol/op
   --data-urlencode username=blue-user \
   --data-urlencode password="$BLUE_PASSWORD" | jq -r .access_token)"
 
-curl -i -H "Authorization: Bearer $TOKEN" "https://${API_HOST}/blue" # 200
-curl -i -H "Authorization: Bearer $TOKEN" "https://${API_HOST}/red"  # 403
+curl --resolve "${API_HOST}:80:${GATEWAY_VIP}" -i \
+  -H "Authorization: Bearer $TOKEN" "http://${API_HOST}/blue" # 200
+curl --resolve "${API_HOST}:80:${GATEWAY_VIP}" -i \
+  -H "Authorization: Bearer $TOKEN" "http://${API_HOST}/red"  # 403
 ```
 
 Para produção, prefira `authorization_code` com PKCE para usuários humanos ou
@@ -139,16 +146,15 @@ oc logs -n kuadrant-system -l authorino-resource=authorino --tail=100
 - Um `AuthPolicy` no `HTTPRoute` permite que cada time de aplicação tenha regra
   própria, enquanto um `AuthPolicy` no `Gateway` é adequado para um deny-all
   corporativo. A documentação RHCL recomenda o padrão deny-all para zero trust.
-- O exemplo usa HTTP na malha e TLS na borda Route para reduzir o escopo da
-  demonstração. Para produção, defina TLS/mTLS de ponta a ponta, rotação de
-  certificados, alta disponibilidade para Keycloak e banco PostgreSQL externo.
+- A demonstração usa HTTP no VIP para reduzir o escopo. Para produção, defina
+  um listener HTTPS no `Gateway`, certificado e DNS apontando para o VIP, além
+  de mTLS de backend, rotação de certificados, alta disponibilidade para
+  Keycloak e banco PostgreSQL externo.
 - O predicado OPA é deliberadamente fechado: qualquer caminho fora de `/blue` e
   `/red`, role ausente ou claim incompatível é negado.
 - A restrição de IP/CIDR é implementada antes do RHCL e é independente do JWT.
-  O procedimento, limitações de topologia e a validação estão no
-  [guia específico](source-cidr-allowlist.md). Em Service Mesh 3.4.2, a
-  configuração de topologia de gateway é Developer Preview; trate esta PoC como
-  validação técnica e confirme a alternativa suportada para produção.
+  O procedimento, pré-requisitos de rede e a validação pelo VIP estão no
+  [guia específico](source-cidr-allowlist.md).
 
 ## Referências
 
