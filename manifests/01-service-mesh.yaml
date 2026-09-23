@@ -1,0 +1,32 @@
+# OpenShift Service Mesh 3.4: control plane owned by this demonstration.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-cni
+  labels:
+    app.kubernetes.io/part-of: hello-rbac-demo
+---
+apiVersion: sailoperator.io/v1
+kind: IstioCNI
+metadata:
+  name: default
+spec:
+  version: v1.30.4
+  namespace: istio-cni
+  profile: openshift
+---
+apiVersion: sailoperator.io/v1
+kind: Istio
+metadata:
+  name: hello-rbac
+spec:
+  version: v1.30.4
+  namespace: istio-system
+  profile: openshift
+  updateStrategy:
+    type: InPlace
+  values:
+    global:
+      proxy:
+        seccompProfile:
+          type: RuntimeDefault

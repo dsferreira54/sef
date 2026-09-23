@@ -1,0 +1,12 @@
+# Local credentials and generated access material
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.kubeconfig
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/

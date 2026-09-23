@@ -1,0 +1,37 @@
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: hello-rbac-jwt-and-roles
+  namespace: hello-rbac
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: hello-rbac
+  rules:
+    authentication:
+      keycloak-jwt:
+        jwt:
+          issuerUrl: https://sso.apps.cluster-vf4dp.dyn.redhatworkshops.io/realms/hello-rbac
+    authorization:
+      endpoint-role:
+        opa:
+          rego: |
+            allow {
+              input.request.path == "/blue"
+              input.auth.identity.realm_access.roles[_] == "blue"
+            }
+
+            allow {
+              input.request.path == "/red"
+              input.auth.identity.realm_access.roles[_] == "red"
+            }
+    response:
+      unauthenticated:
+        code: 401
+        body:
+          value: '{"error":"unauthenticated","message":"A valid Keycloak JWT is required."}'
+      unauthorized:
+        code: 403
+        body:
+          value: '{"error":"forbidden","message":"The token lacks the role required by this endpoint."}'

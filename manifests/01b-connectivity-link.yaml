@@ -1,0 +1,10 @@
+# This CR instantiates the RHCL control plane after its operators are installed.
+apiVersion: kuadrant.io/v1beta1
+kind: Kuadrant
+metadata:
+  name: kuadrant
+  namespace: kuadrant-system
+spec:
+  components:
+    developerPortal:
+      enabled: false

@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-rbac-app
+  namespace: hello-rbac
+  labels:
+    app.kubernetes.io/name: hello-rbac-app
+    app.kubernetes.io/part-of: hello-rbac-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello-rbac-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello-rbac-app
+    spec:
+      containers:
+        - name: hello
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - -listen=:8080
+            - -text=Hello World — protected by Connectivity Link
+          ports:
+            - containerPort: 8080
+              name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-rbac-app
+  namespace: hello-rbac
+spec:
+  selector:
+    app.kubernetes.io/name: hello-rbac-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: hello-gateway
+  namespace: hello-rbac
+  labels:
+    app.kubernetes.io/part-of: hello-rbac-demo
+    kuadrant.io/gateway: "true"
+  annotations:
+    networking.istio.io/service-type: ClusterIP
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      hostname: hello-rbac.apps.cluster-vf4dp.dyn.redhatworkshops.io
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hello-rbac
+  namespace: hello-rbac
+  labels:
+    app.kubernetes.io/part-of: hello-rbac-demo
+spec:
+  parentRefs:
+    - name: hello-gateway
+      sectionName: http
+  hostnames:
+    - hello-rbac.apps.cluster-vf4dp.dyn.redhatworkshops.io
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /blue
+      backendRefs:
+        - name: hello-rbac-app
+          port: 8080
+    - matches:
+        - path:
+            type: Exact
+            value: /red
+      backendRefs:
+        - name: hello-rbac-app
+          port: 8080
+---
+# The OpenShift Route supplies the public DNS/TLS edge while Istio owns the
+# gateway service and Connectivity Link enforces the policy on the HTTPRoute.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: hello-rbac
+  namespace: hello-rbac
+spec:
+  host: hello-rbac.apps.cluster-vf4dp.dyn.redhatworkshops.io
+  to:
+    kind: Service
+    name: hello-gateway-istio
+  port:
+    targetPort: 80
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

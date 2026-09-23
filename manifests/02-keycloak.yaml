@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hello-rbac
+  labels:
+    app.kubernetes.io/part-of: hello-rbac-demo
+    istio.io/rev: hello-rbac
+---
+# The Keycloak operator in this cluster is scoped to the `keycloak` namespace.
+# Values for placeholders are read from a Secret in that namespace; no password
+# or OAuth client secret is committed to this repository.
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: hello-rbac
+  namespace: keycloak
+spec:
+  keycloakCRName: keycloak
+  placeholders:
+    HELLO_RBAC_CLIENT_SECRET:
+      secret:
+        name: hello-rbac-oidc-client
+        key: client-secret
+    HELLO_RBAC_BLUE_PASSWORD:
+      secret:
+        name: hello-rbac-test-users
+        key: blue-password
+    HELLO_RBAC_RED_PASSWORD:
+      secret:
+        name: hello-rbac-test-users
+        key: red-password
+  realm:
+    realm: hello-rbac
+    displayName: Hello RBAC demo
+    enabled: true
+    roles:
+      realm:
+        - name: blue
+          description: Grants access to GET /blue only.
+        - name: red
+          description: Grants access to GET /red only.
+    clients:
+      - clientId: hello-rbac-client
+        name: Hello RBAC client
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        secret: "${HELLO_RBAC_CLIENT_SECRET}"
+        directAccessGrantsEnabled: true
+        serviceAccountsEnabled: false
+        standardFlowEnabled: false
+        fullScopeAllowed: true
+    users:
+      - username: blue-user
+        enabled: true
+        email: blue-user@example.invalid
+        emailVerified: true
+        firstName: Blue
+        lastName: Demo
+        realmRoles:
+          - blue
+        credentials:
+          - type: password
+            value: "${HELLO_RBAC_BLUE_PASSWORD}"
+            temporary: false
+      - username: red-user
+        enabled: true
+        email: red-user@example.invalid
+        emailVerified: true
+        firstName: Red
+        lastName: Demo
+        realmRoles:
+          - red
+        credentials:
+          - type: password
+            value: "${HELLO_RBAC_RED_PASSWORD}"
+            temporary: false
