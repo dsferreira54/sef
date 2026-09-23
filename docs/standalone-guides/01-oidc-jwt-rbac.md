@@ -2,248 +2,85 @@
 
 ## O que este manual entrega
 
-Ao final, uma API já existente terá dois endpoints protegidos no gateway:
+Ao final, uma API já existente terá seus endpoints protegidos no Gateway:
 
 | Endpoint | Quem pode acessar |
 |---|---|
 | `GET /blue` | Somente token JWT com a role `blue` |
 | `GET /red` | Somente token JWT com a role `red` |
 
-A aplicação não precisa validar token, conhecer Keycloak ou ter qualquer linha
-de código alterada. A validação ocorre antes de a requisição chegar ao serviço:
+A aplicação não precisa validar token, conhecer Keycloak ou ter código
+alterado. A validação e a autorização acontecem antes de a requisição chegar ao
+serviço:
 
 ```text
 Cliente → Gateway Istio → RHCL/Authorino → Serviço existente
-                         ↘ Keycloak (descoberta OIDC e chaves públicas)
+                         ↘ Keycloak (discovery OIDC e chaves públicas)
 ```
 
-Este manual pressupõe OpenShift Service Mesh 3.4, Red Hat Connectivity Link
-(RHCL) 1.4 e Red Hat build of Keycloak (RHBK) já instalados e operacionais. Os
-nomes são exemplos: ajuste-os antes de aplicar no ambiente.
+Este manual trata exclusivamente da `AuthPolicy`. Ele não altera a publicação
+da API, o Gateway, o `HTTPRoute`, o Keycloak, o realm, o cliente OIDC nem os
+usuários.
 
 ## Antes de começar
 
+Este manual pressupõe que OpenShift Service Mesh, RHCL/Authorino, Keycloak,
+Gateway e `HTTPRoute` já estão operacionais no ambiente do cliente.
+
+Também é necessário que o Keycloak já emita JWTs com estas roles de realm:
+
+| Role | Usuário ou consumidor de teste |
+|---|---|
+| `blue` | Deve receber a role `blue` no token |
+| `red` | Deve receber a role `red` no token |
+
+As roles precisam aparecer no claim `realm_access.roles` do JWT. Se o ambiente
+usar outro claim, ajuste somente a expressão Rego mostrada no passo 1.
+
 Você precisa ter:
 
-- Acesso `cluster-admin` ou permissões equivalentes para criar recursos no
-  namespace da API e no namespace do Keycloak.
-- OpenShift Service Mesh com um `GatewayClass` Istio aceito.
-- RHCL instalado e saudável, com `Kuadrant` e `Authorino` em execução.
-- Um Keycloak gerenciado pelo operador, já acessível pelo Gateway para consulta
-  ao discovery OIDC e às chaves públicas (JWKS).
-- Uma aplicação existente atrás de um `Service` Kubernetes. O exemplo usa o
-  serviço `orders-api` na porta `8080`.
+- Permissão para criar uma `AuthPolicy` no namespace da API.
+- O nome do namespace, do `HTTPRoute` e do Gateway já existentes.
+- A URL exata do issuer do Keycloak, incluindo `/realms/<nome-do-realm>`.
+- Um token de teste para a role `blue` e outro para a role `red`.
 
-Faça esta verificação inicial:
+Use estes nomes de exemplo e substitua todos antes de aplicar:
 
-```bash
-oc get gatewayclass
-oc get kuadrant -A
-oc get authorino -A
-oc get keycloak -A
-```
+| Item | Exemplo |
+|---|---|
+| Namespace da API | `orders-api` |
+| Gateway existente | `orders-gateway` |
+| HTTPRoute existente | `orders-api` |
+| Issuer do Keycloak | `https://sso.internal.example.com/realms/orders` |
+| Endereço da API | `http://orders-api.internal.example.com` |
 
-No exemplo abaixo serão usados estes valores:
-
-| Variável | Exemplo | Ajuste necessário |
-|---|---|---|
-| Namespace da API | `orders-api` | Sim |
-| Revisão Istio | `production` | Sim |
-| Namespace do Keycloak | `keycloak` | Sim, se diferente |
-| CR do Keycloak | `keycloak` | Sim, se diferente |
-| Realm | `orders` | Opcional |
-| Cliente OIDC | `orders-api-client` | Opcional |
-| Host do Keycloak | `sso.internal.example.com` | Sim |
-| Host da API | `orders-api.internal.example.com` | Sim |
-
-## Passo 1 — Preparar o namespace da API
-
-O label `istio.io/rev` faz o Gateway usar a revisão do Istio escolhida. Se o
-namespace já existe, aplique apenas o label correspondente à sua malha.
+Confirme que o alvo da política já existe. Esses comandos não alteram a
+configuração atual:
 
 ```bash
-oc create namespace orders-api --dry-run=client -o yaml | oc apply -f -
-oc label namespace orders-api istio.io/rev=production --overwrite
+oc -n orders-api get gateway orders-gateway
+oc -n orders-api get httproute orders-api
 ```
 
-Confirme que o serviço existente está disponível:
+## Como a política funciona
 
-```bash
-oc -n orders-api get service orders-api
-oc -n orders-api get endpointslice -l kubernetes.io/service-name=orders-api
+A `AuthPolicy` primeiro valida assinatura, emissor e prazo de validade do JWT
+usando as informações OIDC do Keycloak. Depois, a regra Rego avalia o caminho
+da requisição e a role no token:
+
+```text
+JWT ausente, inválido ou expirado  → 401
+JWT válido, mas sem a role exigida → 403
+JWT válido, com a role exigida     → chamada segue para a API
 ```
 
-## Passo 2 — Criar segredos fora do Git
+Qualquer caminho não listado na regra é negado. Portanto, adicione regras
+explícitas ao publicar novos endpoints.
 
-O segredo do cliente OIDC e as senhas de teste NÃO DEVEM entrar em repositórios,
-tickets ou arquivos YAML. Crie-os diretamente no cluster ou com um cofre
-integrado ao GitOps.
+## Passo 1 — Criar a AuthPolicy
 
-```bash
-oc -n keycloak create secret generic orders-api-oidc-client \
-  --from-literal=client-id=orders-api-client \
-  --from-literal=client-secret="$(openssl rand -base64 48 | tr -d '\n')"
-
-oc -n keycloak create secret generic orders-api-test-users \
-  --from-literal=blue-password="$(openssl rand -base64 32 | tr -d '\n')" \
-  --from-literal=red-password="$(openssl rand -base64 32 | tr -d '\n')"
-```
-
-## Passo 3 — Criar realm, cliente, roles e usuários no Keycloak
-
-O YAML completo abaixo cria:
-
-- Realm `orders`;
-- Roles de realm `blue` e `red`;
-- Cliente confidencial `orders-api-client`;
-- Usuários de teste `blue-user` e `red-user`.
-
-O operador Keycloak normalmente observa `KeycloakRealmImport` apenas no seu
-próprio namespace. Troque `keycloakCRName` caso o CR do Keycloak tenha outro
-nome.
-
-```yaml
-apiVersion: k8s.keycloak.org/v2alpha1
-kind: KeycloakRealmImport
-metadata:
-  name: orders-realm
-  namespace: keycloak
-spec:
-  keycloakCRName: keycloak
-  placeholders:
-    OIDC_CLIENT_SECRET:
-      secret:
-        name: orders-api-oidc-client
-        key: client-secret
-    BLUE_PASSWORD:
-      secret:
-        name: orders-api-test-users
-        key: blue-password
-    RED_PASSWORD:
-      secret:
-        name: orders-api-test-users
-        key: red-password
-  realm:
-    realm: orders
-    displayName: Orders API
-    enabled: true
-    roles:
-      realm:
-        - name: blue
-          description: Permite GET /blue.
-        - name: red
-          description: Permite GET /red.
-    clients:
-      - clientId: orders-api-client
-        name: Orders API test client
-        enabled: true
-        protocol: openid-connect
-        publicClient: false
-        clientAuthenticatorType: client-secret
-        secret: "${OIDC_CLIENT_SECRET}"
-        directAccessGrantsEnabled: true
-        standardFlowEnabled: false
-        serviceAccountsEnabled: false
-        fullScopeAllowed: true
-    users:
-      - username: blue-user
-        enabled: true
-        email: blue-user@example.invalid
-        emailVerified: true
-        realmRoles:
-          - blue
-        credentials:
-          - type: password
-            value: "${BLUE_PASSWORD}"
-            temporary: false
-      - username: red-user
-        enabled: true
-        email: red-user@example.invalid
-        emailVerified: true
-        realmRoles:
-          - red
-        credentials:
-          - type: password
-            value: "${RED_PASSWORD}"
-            temporary: false
-```
-
-Salve como `orders-realm.yaml` e aplique:
-
-```bash
-oc apply -f orders-realm.yaml
-oc -n keycloak get keycloakrealmimport orders-realm
-```
-
-O importador é indicado para a criação inicial. Para mudar um realm já criado,
-use uma automação de administração do Keycloak ou a Admin API; reaplicar o
-importador não é um mecanismo de atualização de realm.
-
-## Passo 4 — Publicar o serviço existente com Gateway API
-
-Este exemplo não cria nem muda a aplicação. Ele apenas encaminha `/blue` e
-`/red` para o `Service` existente. Caso você já possua um `Gateway` e um
-`HTTPRoute`, mantenha-os e ajuste apenas os nomes usados no próximo passo.
-
-```yaml
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: orders-gateway
-  namespace: orders-api
-  labels:
-    kuadrant.io/gateway: "true"
-spec:
-  gatewayClassName: istio
-  listeners:
-    - name: http
-      hostname: orders-api.internal.example.com
-      port: 80
-      protocol: HTTP
-      allowedRoutes:
-        namespaces:
-          from: Same
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: orders-api
-  namespace: orders-api
-spec:
-  parentRefs:
-    - name: orders-gateway
-      sectionName: http
-  hostnames:
-    - orders-api.internal.example.com
-  rules:
-    - matches:
-        - path:
-            type: Exact
-            value: /blue
-      backendRefs:
-        - name: orders-api
-          port: 8080
-    - matches:
-        - path:
-            type: Exact
-            value: /red
-      backendRefs:
-        - name: orders-api
-          port: 8080
-```
-
-Salve como `orders-gateway.yaml`, aplique e espere o Gateway ser programado:
-
-```bash
-oc apply -f orders-gateway.yaml
-oc -n orders-api wait gateway/orders-gateway \
-  --for=condition=Programmed=True --timeout=3m
-```
-
-## Passo 5 — Aplicar autenticação JWT e autorização por role
-
-Este é o recurso que protege a API. Troque o host em `issuerUrl` pelo endereço
-real do Keycloak e mantenha `/realms/orders` coerente com o realm criado.
+Crie a política no mesmo namespace do `HTTPRoute`. Troque `namespace`, nome do
+`HTTPRoute` e `issuerUrl` pelos valores do ambiente.
 
 ```yaml
 apiVersion: kuadrant.io/v1
@@ -295,53 +132,53 @@ oc -n orders-api get authpolicy orders-api-jwt-and-roles \
 
 O resultado esperado é `Accepted=True Enforced=True`.
 
-## Passo 6 — Testar ponta a ponta
+## Passo 2 — Testar a política
 
-Use o endereço pelo qual o Gateway está publicado. Neste exemplo ele é
-`http://orders-api.internal.example.com`.
+Obtenha previamente no Keycloak os dois tokens de teste. Não grave tokens,
+segredos ou senhas em arquivos, tickets ou repositórios.
 
 ```bash
-export KEYCLOAK_HOST=sso.internal.example.com
 export API_URL=http://orders-api.internal.example.com
-export CLIENT_ID="$(oc -n keycloak get secret orders-api-oidc-client -o jsonpath='{.data.client-id}' | base64 -d)"
-export CLIENT_SECRET="$(oc -n keycloak get secret orders-api-oidc-client -o jsonpath='{.data.client-secret}' | base64 -d)"
-export BLUE_PASSWORD="$(oc -n keycloak get secret orders-api-test-users -o jsonpath='{.data.blue-password}' | base64 -d)"
-
-BLUE_TOKEN="$(curl -fsS -X POST \
-  "https://${KEYCLOAK_HOST}/realms/orders/protocol/openid-connect/token" \
-  --data-urlencode grant_type=password \
-  --data-urlencode client_id="$CLIENT_ID" \
-  --data-urlencode client_secret="$CLIENT_SECRET" \
-  --data-urlencode username=blue-user \
-  --data-urlencode password="$BLUE_PASSWORD" | jq -r .access_token)"
+export BLUE_TOKEN='cole-aqui-o-jwt-com-a-role-blue'
+export RED_TOKEN='cole-aqui-o-jwt-com-a-role-red'
 ```
 
-Execute a matriz de teste:
+Execute a matriz completa:
 
 ```bash
 curl -i "${API_URL}/blue"                                      # 401
 curl -i -H "Authorization: Bearer ${BLUE_TOKEN}" "${API_URL}/blue" # 200
 curl -i -H "Authorization: Bearer ${BLUE_TOKEN}" "${API_URL}/red"  # 403
+curl -i -H "Authorization: Bearer ${RED_TOKEN}" "${API_URL}/red"   # 200
+curl -i -H "Authorization: Bearer ${RED_TOKEN}" "${API_URL}/blue"  # 403
 ```
 
-Para testar `red-user`, obtenha o token com a senha `red-password` e valide
-que `/red` retorna 200 e `/blue` retorna 403.
+Os testes devem ser feitos pelo mesmo endereço já publicado da API. Assim, a
+validação passa pelo Gateway e pela `AuthPolicy`.
 
-## Problemas comuns
+## Diagnóstico
+
+Confira o estado da política e o alvo configurado:
+
+```bash
+oc -n orders-api get authpolicy orders-api-jwt-and-roles -o yaml
+oc -n orders-api get httproute orders-api
+```
 
 | Sintoma | Causa provável | Ação |
 |---|---|---|
-| `401` com token aparentemente válido | `issuerUrl` diferente do claim `iss`, ou gateway sem acesso ao JWKS | Compare `iss` com `issuerUrl` e teste discovery/JWKS a partir da malha. |
-| `403` em ambos os endpoints | Role não está em `realm_access.roles` | Confirme as realm roles atribuídas ao usuário e emita um novo token. |
-| `AuthPolicy` não é aplicada | Nome/namespace do `HTTPRoute` incorreto ou Gateway sem label RHCL | Confira `targetRef`, namespace e `kuadrant.io/gateway: "true"`. |
-| Gateway não gera workload | Namespace sem a revisão Istio correta | Confira `istio.io/rev` e `GatewayClass`. |
+| `401` com token aparentemente válido | `issuerUrl` difere do claim `iss`, token expirado ou Gateway sem acesso ao discovery/JWKS | Compare o claim `iss` do token com `issuerUrl` e valide a conectividade do Gateway ao Keycloak. |
+| `403` em ambos os endpoints | Role ausente do claim `realm_access.roles` ou caminho diferente do definido na regra | Confira o payload do token, as roles atribuídas e o caminho chamado. |
+| `AuthPolicy` não é aplicada | Nome ou namespace do `HTTPRoute` incorreto, ou Gateway não está integrado ao RHCL | Confira `targetRef`, namespace e a configuração RHCL do Gateway existente. |
+| Endpoint novo retorna 403 | O caminho não foi incluído na regra Rego | Acrescente uma regra explícita para o novo endpoint e a role correspondente. |
 
 ## Recomendações para produção
 
-- Desabilite `directAccessGrantsEnabled` após os testes. Para pessoas, use
-  `authorization_code` com PKCE; para integrações, use `client_credentials`.
-- Valide `aud` quando os tokens puderem ser aceitos por mais de uma API.
-- Use HTTPS no Gateway, rotação de certificados e mTLS entre gateway e backend
+- Use o fluxo OIDC adequado ao consumidor: `authorization_code` com PKCE para
+  pessoas e `client_credentials` para integrações máquina a máquina.
+- Valide `aud` quando tokens de um mesmo issuer puderem ser usados por mais de
+  uma API.
+- Use HTTPS no Gateway, rotação de certificados e mTLS entre Gateway e backend
   conforme a política corporativa.
-- Armazene segredos em cofre e trate a política Rego como código versionado e
-  testado.
+- Trate a política Rego como código versionado e revisado. Roles e endpoints
+  novos devem ter testes de acesso permitido e negado.
